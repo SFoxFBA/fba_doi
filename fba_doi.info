@@ -1,0 +1,4 @@
+name = "FBA DOI API"
+description = "Additional functionality for FBA DOI"
+core = 6.x
+dependencies[] = islandora_doi

@@ -1,0 +1,94 @@
+<?php
+
+define('DATACITE_DOI_URL', 'mds.datacite.org/doi');
+define('TEST_DATACITE_DOI_URL', 'test.datacite.org/mds/doi');
+define('TEST_DATACITE_DOI_METADATA_URL', 'test.datacite.org/mds/metadata');
+
+
+function fba_check_doi($doi) {
+  $prefix = islandora_doi_get_prefix();
+  $doi = $prefix . '/' . $doi;
+
+  $fullurl = islandora_doi_get_hostname() . '/' . $url;
+  $data = drupal_query_string_encode(array('doi' => $doi, 'url' => $fullurl));
+
+  //$request_url = 'https://' . variable_get('islandora_doi_username', '') . ':' . variable_get('islandora_doi_password', '') . '@' . DATACITE_DOI_URL;
+  //SFOX custom url for testing only.
+  $request_url = 'https://' . variable_get('islandora_doi_username', '') . ':' . variable_get('islandora_doi_password', '') . '@' . TEST_DATACITE_DOI_URL . '/' . $doi;
+
+  $response = drupal_http_request ($request_url, array('Content-Type' => 'application/x-www-form-urlencoded', 'charset' => 'UTF-8'), 'GET');
+
+  if ($response->code == '200') {
+    return $doi;
+  }
+  else {
+    watchdog('islandora_doi', 'DOI check failed: ' . $response->data);
+    return FALSE;
+  }
+}
+
+function mintdoi($pid) {
+  module_load_include('module', 'islandora_doi', 'islandora_doi');
+  module_load_include('inc', 'fedora_repository', 'api/tuque');
+
+  $fedora_object = islandora_object_load($pid);
+  $dtca = $fedora_object['DTCA'];
+  $dtcacontent = $dtca->content;
+  $dtcads = simplexml_load_string($dtcacontent);
+  foreach ($dtcads->relatedParty as $relparty) {
+    switch ($relparty['type']) {
+      case 'corporate': {
+          $names[] = (string) $relparty->namePart;
+
+          break;
+        }
+      case 'personal': {
+          $names[] = (string) $relparty->namePart[0] . ', ' . $relparty->namePart[1];
+          break;
+        }
+    }
+  }
+  $dc = $fedora_object['DC'];
+  $dccontent = $dc->content;
+  $dcds = simplexml_load_string($dccontent, NULL, NULL, 'http://purl.org/dc/elements/1.1/');
+  $dctitle = (string) $dcds->title;
+  //Need to create the xml for minting a doi for this object
+  $prefix = islandora_doi_get_prefix();
+  $reformattedpid = str_replace(':', '', $pid);
+  $datacitexml = _create_datacite_xml($prefix, $pid, $names, $dctitle);
+  //1. Register DOI Metadata
+  islandora_doi_register_metadata($reformattedpid, $datacitexml);
+
+  //2. Mint the DOI
+  $minteddoi = islandora_doi_mint($reformattedpid, $pid);
+  if ($minteddoi === FALSE) {
+    //minting has failed for some reason (check watchdog logs)
+  }
+  else {
+    //3. Add the doi to /dtca:Dataset/dtca:doi
+    $sxmldtca = new SimpleXMLElement($dtcacontent);
+    $sxmldtca->doi = $minteddoi;
+
+    $fedora_object['DTCA']->content = $sxmldtca->asXML();
+  }
+  return $minteddoi;
+}
+
+function create_datacite_xml($prefix, $pid, $names, $titletext) {
+  $reformattedpid = str_replace(':', '', $pid);
+
+  $datacitexml = '<?xml version="1.0" encoding="UTF-8"?>';
+  $datacitexml .= '<resource xmlns="http://datacite.org/schema/kernel-3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://datacite.org/schema/kernel-3 http://schema.datacite.org/meta/kernel-3/metadata.xsd">';
+
+  $datacitexml .= '<identifier identifierType="DOI">' . $prefix . '/' . $reformattedpid . '</identifier><creators>';
+  foreach ($names as $name) {
+    $datacitexml .= '<creator><creatorName>' . $name . '</creatorName></creator>';
+  }
+
+  $datacitexml .= '</creators>';
+  $datacitexml .= '<titles><title>' . $titletext . '</title></titles>';
+  $datacitexml .= '<publisher>Freshwater Biological Association (FBA)</publisher>';
+  $datacitexml .= '<publicationYear>' . date("Y") . '</publicationYear></resource>';
+
+  return $datacitexml;
+}
