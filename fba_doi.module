@@ -55,19 +55,7 @@ function mintdoi($pid) {
   $dtca = $fedora_object['DTCA'];
   $dtcacontent = $dtca->content;
   $dtcads = simplexml_load_string($dtcacontent);
-  foreach ($dtcads->relatedParty as $relparty) {
-    switch ($relparty['type']) {
-      case 'corporate': {
-          $names[] = (string) $relparty->namePart;
-
-          break;
-        }
-      case 'personal': {
-          $names[] = (string) $relparty->namePart[0] . ', ' . $relparty->namePart[1];
-          break;
-        }
-    }
-  }
+  //
   $dc = $fedora_object['DC'];
   $dccontent = $dc->content;
   $dcds = simplexml_load_string($dccontent, NULL, NULL, 'http://purl.org/dc/elements/1.1/');
@@ -75,23 +63,34 @@ function mintdoi($pid) {
   //Need to create the xml for minting a doi for this object
   $prefix = islandora_doi_get_prefix();
   $reformattedpid = str_replace(':', '', $pid);
-  $datacitexml = create_datacite_xml($prefix, $pid, $names, $dctitle);
-  //1. Register DOI Metadata
-  islandora_doi_register_metadata($reformattedpid, $datacitexml);
+  //Use the creation date of the published object
+  $createdate = (string) $dtcads->archivalPublicationDate;
+  $version = (int) $dtcads->version;
+  if ($version === 0) {
+    $version = 1;
+  }
+  $datacitexml = create_datacite_xml($prefix, $pid, $dctitle, $version, $createdate, $dtcads->relatedParty);
 
-  //2. Mint the DOI
-  $minteddoi = islandora_doi_mint($reformattedpid, $pid);
-  if ($minteddoi === false) {
-    //minting has failed for some reason (check watchdog logs)
+  //1. Register DOI Metadata
+  $metadatadoi = islandora_doi_register_metadata($reformattedpid, $datacitexml);
+  if ($metadatadoi !== FALSE) {
+    //2. Mint the DOI
+    $minteddoi = islandora_doi_mint($reformattedpid, 'archive/' . $pid);
+    if ($minteddoi !== FALSE) {
+      //3. Add the doi to /dtca:Dataset/dtca:doi
+      $sxmldtca = new SimpleXMLElement($dtcacontent);
+      $sxmldtca->doi = $minteddoi;
+      $fedora_object['DTCA']->content = $sxmldtca->asXML();
+      return $minteddoi;
+    }
+    else {
+      return FALSE;
+    }
   }
   else {
-    //3. Add the doi to /dtca:Dataset/dtca:doi
-    $sxmldtca = new SimpleXMLElement($dtcacontent);
-    $sxmldtca->doi = $minteddoi;
-
-    $fedora_object['DTCA']->content = $sxmldtca->asXML();
+    //metadata has failed for some reason (check watchdog logs
+    return FALSE;
   }
-  return $minteddoi;
 }
 
 /**
@@ -103,23 +102,100 @@ function mintdoi($pid) {
  * @param type $titletext
  * @return string
  */
-function create_datacite_xml($prefix, $pid, $names, $titletext) {
+function create_datacite_xml($prefix, $pid, $titletext, $version, $createdate, $relatedparty) {
+  module_load_include('inc', 'sidora', 'includes/fba');
+
   $reformattedpid = str_replace(':', '', $pid);
 
-  $datacitexml = '<?xml version="1.0" encoding="UTF-8"?>';
-  $datacitexml .= '<resource xmlns="http://datacite.org/schema/kernel-3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://datacite.org/schema/kernel-3 http://schema.datacite.org/meta/kernel-3/metadata.xsd">';
+  $newDom = new DOMDocument('1.0', 'utf-8');
+  $newDom->formatOutput = TRUE;
 
-  $datacitexml .= '<identifier identifierType="DOI">'
-      . $prefix . '/' . $reformattedpid . '</identifier><creators>';
-  
-  foreach ($names as $name) {
-    $datacitexml .= '<creator><creatorName>' . $name . '</creatorName></creator>';
+  $rootEl = $newDom->createElement('resource');
+  $rootEl->setAttribute('xmlns', 'http://datacite.org/schema/kernel-3');
+  $rootEl->setAttribute('xmlns:xsi', 'http://www.w3.org/2001/XMLSchema-instance');
+  $rootEl->setAttribute('xsi:schemaLocation', 'http://datacite.org/schema/kernel-3 http://schema.datacite.org/meta/kernel-3/metadata.xsd');
+
+  $identifier = $newDom->createElement('identifier', $prefix . '/' . $reformattedpid);
+  $identifier->setAttribute('identifierType', 'DOI');
+  $rootEl->appendChild($identifier);
+//
+  $creatorlist = sidora_return_related_party_creators();
+  $creators = $newDom->createElement('creators');
+  foreach ($relatedparty as $relparty) {
+    switch ($relparty['type']) {
+      case 'corporate': {
+          $role = (string) $relparty->corporateRole;
+          $namepart = (string) $relparty->namePart;
+          break;
+        }
+      case 'personal': {
+          $role = (string) $relparty->personalRole;
+          $namepart = (string) $relparty->namePart[0] . ', ' . $relparty->namePart[1];
+          break;
+        }
+    }
+    if (in_array($role, $creatorlist)) {
+      $creator = $newDom->createElement('creator');
+      $creatorname = $newDom->createElement('creatorName', $namepart);
+      $creator->appendChild($creatorname);
+      $creators->appendChild($creator);
+    }
   }
+  $rootEl->appendChild($creators);
+//
+  $titles = $newDom->createElement('titles');
+  $title = $newDom->createElement('title', $titletext);
+  $titles->appendChild($title);
+  $rootEl->appendChild($titles);
 
-  $datacitexml .= '</creators>';
-  $datacitexml .= '<titles><title>' . $titletext . '</title></titles>';
-  $datacitexml .= '<publisher>Freshwater Biological Association (FBA)</publisher>';
-  $datacitexml .= '<publicationYear>' . date("Y") . '</publicationYear></resource>';
+  $publisher = $newDom->createElement('publisher', 'Freshwater Biological Association (FBA)');
+  $rootEl->appendChild($publisher);
 
+  $pubyear = $newDom->createElement('publicationYear', date("Y"));
+  $rootEl->appendChild($pubyear);
+
+  $datesdom = $newDom->createElement('dates');
+  $createdatedom = $newDom->createElement('date', $createdate);
+  $createdatedom->setAttribute('dateType', 'Created');
+  $datesdom->appendChild($createdatedom);
+  $rootEl->appendChild($datesdom);
+//
+  $contributors = $newDom->createElement('contributors');
+  $contributorlist = sidora_return_related_party_contributors();
+  foreach ($relatedparty as $relparty) {
+    switch ($relparty['type']) {
+      case 'corporate': {
+          $role = (string) $relparty->corporateRole;
+          $namepart = (string) $relparty->namePart;
+          break;
+        }
+      case 'personal': {
+          $role = (string) $relparty->personalRole;
+          $namepart = (string) $relparty->namePart[0] . ', ' . $relparty->namePart[1];
+          break;
+        }
+    }
+    if (in_array($role, $contributorlist)) {
+      $contributor = $newDom->createElement('contributor');
+      $conttype = sidora_translate_related_party_contributor_for_datacite($role);
+      $contributor->setAttribute('contributorType', $conttype);
+      $contname = $newDom->createElement('contributorName', $namepart);
+      $contributor->appendChild($contname);
+      $contributors->appendChild($contributor);
+    }
+  }
+  //HostingInstitution is always hardcoded string
+  $contributor = $newDom->createElement('contributor');
+  $contributor->setAttribute('contributorType', 'HostingInstitution');
+  $contname = $newDom->createElement('contributorName', 'Freshwater Biological Association');
+  $contributor->appendChild($contname);
+  $contributors->appendChild($contributor);
+  $rootEl->appendChild($contributors);
+//
+  $versiondom = $newDom->createElement('version', $version);
+  $rootEl->appendChild($versiondom);
+  $newDom->appendChild($rootEl);
+//
+  $datacitexml = $newDom->saveXML();
   return $datacitexml;
 }
