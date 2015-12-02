@@ -1,201 +1,609 @@
 <?php
 
 define('DATACITE_DOI_URL', 'mds.datacite.org/doi');
-define('TEST_DATACITE_DOI_URL', 'test.datacite.org/mds/doi');
-define('TEST_DATACITE_DOI_METADATA_URL', 'test.datacite.org/mds/metadata');
+define('DATACITE_DOI_METADATA_URL', 'mds.datacite.org/metadata');
+define('TEST_DATACITE_DOI_URL', 'mds.test.datacite.org/doi');
+define('TEST_DATACITE_DOI_METADATA_URL', 'mds.test.datacite.org/metadata');
 
-/**
- * A custom function to expand on the islandora_doi module
- * Returns a DOI if one exists in the Datacite system, or FALSE if not
- * 
- * @param string $doi - this is the pid with the colon removed
- * 
- * @return string|boolean
- * 
- */
-function fba_check_doi($doi) {
-  $prefix = islandora_doi_get_prefix();
-  $doi = $prefix . '/' . $doi;
+class fba_doi {
 
-  $fullurl = islandora_doi_get_hostname() . '/' . $url;
-  $data = drupal_query_string_encode(array('doi' => $doi, 'url' => $fullurl));
-
-  //$request_url = 'https://' . variable_get('islandora_doi_username', '') . ':' 
-  //. variable_get('islandora_doi_password', '') . '@' . DATACITE_DOI_URL;
-  //SFOX custom url for testing only.
-  $request_url = 'https://' . variable_get('islandora_doi_username', '') . ':'
-      . variable_get('islandora_doi_password', '') . '@'
-      . TEST_DATACITE_DOI_URL . '/' . $doi;
-
-  $response = drupal_http_request($request_url, array('Content-Type' => 'application/x-www-form-urlencoded', 'charset' => 'UTF-8'), 'GET');
-
-  if ($response->code == '200') {
-    return $doi;
+  /**
+   * Extracts information required for registering metadata
+   * 
+   * TODO: some handling on error conditions, i.e. islandora_doi_register_metadata
+   * failing...
+   * 
+   * @param type $pid
+   * @return type
+   */
+  function getmetadata($pid) {
+    $reformattedpid = str_replace(':', '', $pid);
+    $metadatadoi = $this->fba_doi_get_metadata($reformattedpid);
+    return $metadatadoi;
   }
-  else {
-    watchdog('islandora_doi', 'DOI check failed: ' . $response->data);
-    return false;
+
+  /**
+   * Extracts information required for registering metadata
+   * 
+   * TODO: some handling on error conditions, i.e. islandora_doi_register_metadata
+   * failing...
+   * 
+   * @param type $pid
+   * @return type
+   */
+  function registermetadata($pid) {
+    module_load_include('inc', 'fedora_repository', 'api/tuque');
+
+    $fedora_object = islandora_object_load($pid);
+    $dtca = $fedora_object['DTCA'];
+    $dtcacontent = $dtca->content;
+    $dtcads = simplexml_load_string($dtcacontent);
+    //
+    $dc = $fedora_object['DC'];
+    $dccontent = $dc->content;
+    $dcds = simplexml_load_string($dccontent, NULL, NULL, 'http://purl.org/dc/elements/1.1/');
+    $dctitle = (string) $dcds->title;
+    //Need to create the xml for minting a doi for this object
+    $prefix = $this->fba_doi_get_prefix();
+    //Use the creation date of the published object
+    $createdate = (string) $dtcads->archivalPublicationDate;
+    $version = (int) $dtcads->version;
+    if ($version === 0) {
+      $version = 1;
+    }
+
+    $datacitexml = $this->create_datacite_xml($prefix, $pid, $dctitle, $version, $createdate, $dtcads->relatedParty);
+    $reformattedpid = str_replace(':', '', $pid);
+    $metadatadoi = $this->fba_doi_register_metadata($reformattedpid, $datacitexml);
+    return $metadatadoi;
   }
-}
 
-/**
- * Extracts information required for registering metadata and minting a doi
- * 
- * TODO: some handling on error conditions, i.e. islandora_doi_register_metadata
- * failing...
- * 
- * @param type $pid
- * @return type
- */
-function mintdoi($pid) {
-  module_load_include('module', 'islandora_doi', 'islandora_doi');
-  module_load_include('inc', 'fedora_repository', 'api/tuque');
+  /**
+   * Extracts information required for minting a doi
+   * 
+   * TODO: some handling on error conditions, i.e. islandora_doi_register_metadata
+   * failing...
+   * 
+   * @param type $pid
+   * @return type
+   */
+  function mintdoi($pid) {
+    module_load_include('inc', 'fedora_repository', 'api/tuque');
 
-  $fedora_object = islandora_object_load($pid);
-  $dtca = $fedora_object['DTCA'];
-  $dtcacontent = $dtca->content;
-  $dtcads = simplexml_load_string($dtcacontent);
-  //
-  $dc = $fedora_object['DC'];
-  $dccontent = $dc->content;
-  $dcds = simplexml_load_string($dccontent, NULL, NULL, 'http://purl.org/dc/elements/1.1/');
-  $dctitle = (string) $dcds->title;
-  //Need to create the xml for minting a doi for this object
-  $prefix = islandora_doi_get_prefix();
-  $reformattedpid = str_replace(':', '', $pid);
-  //Use the creation date of the published object
-  $createdate = (string) $dtcads->archivalPublicationDate;
-  $version = (int) $dtcads->version;
-  if ($version === 0) {
-    $version = 1;
-  }
-  $datacitexml = create_datacite_xml($prefix, $pid, $dctitle, $version, $createdate, $dtcads->relatedParty);
+    $fedora_object = islandora_object_load($pid);
+    $dtca = $fedora_object['DTCA'];
+    $dtcacontent = $dtca->content;
+    //
 
-  //1. Register DOI Metadata
-  $metadatadoi = islandora_doi_register_metadata($reformattedpid, $datacitexml);
-  if ($metadatadoi !== FALSE) {
+    $reformattedpid = str_replace(':', '', $pid);
     //2. Mint the DOI
-    $minteddoi = islandora_doi_mint($reformattedpid, 'archive/' . $pid);
+    $minteddoi = $this->fba_doi_mint($reformattedpid, 'archive/' . $pid);
     if ($minteddoi !== FALSE) {
       //3. Add the doi to /dtca:Dataset/dtca:doi
       $sxmldtca = new SimpleXMLElement($dtcacontent);
       $sxmldtca->doi = $minteddoi;
       $fedora_object['DTCA']->content = $sxmldtca->asXML();
-      return $minteddoi;
+      $ret = $minteddoi;
     }
     else {
+      $ret = FALSE;
+    }
+
+    return $ret;
+  }
+
+  /**
+   * Format the xml that will be passed to the Datacite site 
+   * 
+   * @param type $prefix
+   * @param type $pid
+   * @param type $names
+   * @param type $titletext
+   * @return string
+   */
+  function create_datacite_xml($prefix, $pid, $titletext, $version, $createdate, $relatedparty) {
+    module_load_include('inc', 'sidora', 'includes/fba');
+
+    $reformattedpid = str_replace(':', '', $pid);
+
+    $newDom = new DOMDocument('1.0', 'utf-8');
+    $newDom->formatOutput = TRUE;
+
+    $rootEl = $newDom->createElement('resource');
+    $rootEl->setAttribute('xmlns', 'http://datacite.org/schema/kernel-3');
+    $rootEl->setAttribute('xmlns:xsi', 'http://www.w3.org/2001/XMLSchema-instance');
+    $rootEl->setAttribute('xsi:schemaLocation', 'http://datacite.org/schema/kernel-3 http://schema.datacite.org/meta/kernel-3/metadata.xsd');
+
+    $identifier = $newDom->createElement('identifier', $prefix . '/' . $reformattedpid);
+    $identifier->setAttribute('identifierType', 'DOI');
+    $rootEl->appendChild($identifier);
+    //
+    $creatorlist = sidora_return_related_party_creators();
+    $creators = $newDom->createElement('creators');
+    foreach ($relatedparty as $relparty) {
+      switch ($relparty['type']) {
+        case 'corporate': {
+            $role = (string) $relparty->corporateRole;
+            $namepart = (string) $relparty->namePart;
+            break;
+          }
+        case 'personal': {
+            $role = (string) $relparty->personalRole;
+            $namepart = (string) $relparty->namePart[0] . ', ' . $relparty->namePart[1];
+            break;
+          }
+      }
+      if (in_array($role, $creatorlist)) {
+        $creator = $newDom->createElement('creator');
+        $creatorname = $newDom->createElement('creatorName', $namepart);
+        $creator->appendChild($creatorname);
+        $creators->appendChild($creator);
+      }
+    }
+    $rootEl->appendChild($creators);
+    //
+    $titles = $newDom->createElement('titles');
+    $title = $newDom->createElement('title', $titletext);
+    $titles->appendChild($title);
+    $rootEl->appendChild($titles);
+
+    $publisher = $newDom->createElement('publisher', 'Freshwater Biological Association (FBA)');
+    $rootEl->appendChild($publisher);
+
+    $pubyear = $newDom->createElement('publicationYear', date("Y"));
+    $rootEl->appendChild($pubyear);
+
+    $datesdom = $newDom->createElement('dates');
+    $createdatedom = $newDom->createElement('date', $createdate);
+    $createdatedom->setAttribute('dateType', 'Created');
+    $datesdom->appendChild($createdatedom);
+    $rootEl->appendChild($datesdom);
+    //
+    $contributors = $newDom->createElement('contributors');
+    $contributorlist = sidora_return_related_party_contributors();
+    foreach ($relatedparty as $relparty) {
+      switch ($relparty['type']) {
+        case 'corporate': {
+            $role = (string) $relparty->corporateRole;
+            $namepart = (string) $relparty->namePart;
+            break;
+          }
+        case 'personal': {
+            $role = (string) $relparty->personalRole;
+            $namepart = (string) $relparty->namePart[0] . ', ' . $relparty->namePart[1];
+            break;
+          }
+      }
+      if (in_array($role, $contributorlist)) {
+        $contributor = $newDom->createElement('contributor');
+        $conttype = sidora_translate_related_party_contributor_for_datacite($role);
+        $contributor->setAttribute('contributorType', $conttype);
+        $contname = $newDom->createElement('contributorName', $namepart);
+        $contributor->appendChild($contname);
+        $contributors->appendChild($contributor);
+      }
+    }
+    //HostingInstitution is always hardcoded string
+    $contributor = $newDom->createElement('contributor');
+    $contributor->setAttribute('contributorType', 'HostingInstitution');
+    $contname = $newDom->createElement('contributorName', 'Freshwater Biological Association');
+    $contributor->appendChild($contname);
+    $contributors->appendChild($contributor);
+    $rootEl->appendChild($contributors);
+    //
+    $versiondom = $newDom->createElement('version', $version);
+    $rootEl->appendChild($versiondom);
+    $newDom->appendChild($rootEl);
+    //
+    $datacitexml = $newDom->saveXML();
+    return $datacitexml;
+  }
+
+  function fba_doi_mint($doi, $url) {
+    $testmode = $this->fba_doi_get_testmode();
+    switch ($testmode) {
+      case 0: {
+          //Live processing
+          $doi_url = DATACITE_DOI_URL;
+          $prefix = islandora_doi_get_prefix();
+          $username = islandora_doi_get_username();
+          $password = islandora_doi_get_password();
+          $hostname = islandora_doi_get_hostname();
+          break;
+        }
+      case 1: {
+          //Test processing
+          $doi_url = TEST_DATACITE_DOI_URL;
+          $prefix = $this->fba_doi_get_test_prefix();
+          $username = $this->fba_doi_get_test_username();
+          $password = $this->fba_doi_get_test_password();
+          $hostname = $this->fba_doi_get_test_hostname();
+          break;
+        }
+    }
+    $doi = $prefix . '/' . $doi;
+
+    $fullurl = $hostname . '/' . $url;
+    $data = drupal_query_string_encode(array('doi' => $doi, 'url' => $fullurl));
+
+    $post_request_url = 'https://' . $username . ':' . $password . '@' . $doi_url;
+    $response = drupal_http_request($post_request_url, array('Content-Type' => 'application/x-www-form-urlencoded', 'charset' => 'UTF-8'), 'POST', $data);
+
+    if ($response->code == '201') {
+      $ret = $doi;
+    }
+    else {
+      watchdog('fba_doi', 'DOI mint failed: ' . $response->data);
+      $_SESSION['errormessage'] = array($doi, $response->data);
+      $ret = FALSE;
+    }
+    return $ret;
+  }
+
+  function fba_doi_register_metadata($doi, $metadataxml) {
+    $testmode = $this->fba_doi_get_testmode();
+    switch ($testmode) {
+      case 0: {
+          //Live processing
+          $metadata_url = DATACITE_DOI_METADATA_URL;
+          $prefix = islandora_doi_get_prefix();
+          $username = islandora_doi_get_username();
+          $password = islandora_doi_get_password();
+          $hostname = islandora_doi_get_hostname();
+          break;
+        }
+      case 1: {
+          //Test processing
+          $metadata_url = TEST_DATACITE_DOI_METADATA_URL;
+          $prefix = $this->fba_doi_get_test_prefix();
+          $username = $this->fba_doi_get_test_username();
+          $password = $this->fba_doi_get_test_password();
+          $hostname = $this->fba_doi_get_test_hostname();
+          break;
+        }
+    }
+
+    if (!empty($prefix)) {
+      $doi = $prefix . '/' . $doi;
+
+      $post_request_url = 'https://' . $username . ':' . $password . '@' . $metadata_url;
+      $response = drupal_http_request($post_request_url, array('Content-Type' => 'application/xml', 'charset' => 'UTF-8'), 'POST', $metadataxml);
+
+      if ($response->code == '201') {
+        $ret = $doi;
+      }
+      else {
+        switch ($response->code) {
+          case '400' : {
+              $errortext = 'DOI metadata registration failed: Bad Request: ' . $response->data;
+              watchdog('fba_doi', $errortext);
+              $_SESSION['errormessage'] = array($doi, $errortext);
+              break;
+            }
+          case '401' : {
+              $errortext = 'DOI metadata registration failed: Unauthorised: ' . $response->data;
+              watchdog('fba_doi', $errortext);
+              $_SESSION['errormessage'] = array($doi, $errortext);
+              break;
+            }
+          case '403' : {
+              $errortext = 'DOI metadata registration failed: Forbidden: ' . $response->data;
+              watchdog('fba_doi', $errortext);
+              $_SESSION['errormessage'] = array($doi, $errortext);
+              break;
+            }
+          case '500' : {
+              $errortext = 'DOI metadata registration failed: Internal Server Error: ' . $response->data;
+              watchdog('fba_doi', $errortext);
+              $_SESSION['errormessage'] = array($doi, $errortext);
+              break;
+            }
+          default: {
+              $errortext = 'DOI metadata registraion failed: Unknown response code: ' . $response->data;
+              watchdog('fba_doi', $errortext);
+              $_SESSION['errormessage'] = array($doi, $errortext);
+            }
+        }
+        $ret = FALSE;
+      }
+    }
+    else {
+      watchdog('fba_doi', 'DOI metadata prefix is blank');
+      $_SESSION['errormessage'] = array($doi, 'DOI metadata prefix is blank');
+      $ret = FALSE;
+    }
+    return $ret;
+  }
+
+  function fba_doi_get_metadata($doi) {
+    $testmode = $this->fba_doi_get_testmode();
+    switch ($testmode) {
+      case 0: {
+          //Live processing
+          $metadata_url = DATACITE_DOI_METADATA_URL;
+          $prefix = islandora_doi_get_prefix();
+          $username = islandora_doi_get_username();
+          $password = islandora_doi_get_password();
+          $hostname = islandora_doi_get_hostname();
+          break;
+        }
+      case 1: {
+          //Test processing
+          $metadata_url = TEST_DATACITE_DOI_METADATA_URL;
+          $prefix = $this->fba_doi_get_test_prefix();
+          $username = $this->fba_doi_get_test_username();
+          $password = $this->fba_doi_get_test_password();
+          $hostname = $this->fba_doi_get_test_hostname();
+          break;
+        }
+    }
+
+    if (!empty($prefix)) {
+      $doi = $prefix . '/' . $doi;
+
+      $post_request_url = 'https://' . $username . ':' . $password . '@' . $metadata_url;
+      $response = drupal_http_request($post_request_url, array('Content-Type' => 'application/xml', 'charset' => 'UTF-8'), 'GET');
+
+      if ($response->code == '201') {
+        $ret = $doi;
+      }
+      else {
+        switch ($response->code) {
+          case '400' : {
+              $errortext = 'DOI metadata registration failed: Bad Request: ' . $response->data;
+              watchdog('fba_doi', $errortext);
+              $_SESSION['errormessage'] = array($doi, $errortext);
+              break;
+            }
+          case '401' : {
+              $errortext = 'DOI metadata registration failed: Unauthorised: ' . $response->data;
+              watchdog('fba_doi', $errortext);
+              $_SESSION['errormessage'] = array($doi, $errortext);
+              break;
+            }
+          case '403' : {
+              $errortext = 'DOI metadata registration failed: Forbidden: ' . $response->data;
+              watchdog('fba_doi', $errortext);
+              $_SESSION['errormessage'] = array($doi, $errortext);
+              break;
+            }
+          case '500' : {
+              $errortext = 'DOI metadata registration failed: Internal Server Error: ' . $response->data;
+              watchdog('fba_doi', $errortext);
+              $_SESSION['errormessage'] = array($doi, $errortext);
+              break;
+            }
+          default: {
+              $errortext = 'DOI metadata registraion failed: Unknown response code: ' . $response->data;
+              watchdog('fba_doi', $errortext);
+              $_SESSION['errormessage'] = array($doi, $errortext);
+            }
+        }
+        $ret = FALSE;
+      }
+    }
+    else {
+      $errortext = 'DOI metadata prefix is blank';
+      watchdog('fba_doi', $errortext);
+      $_SESSION['errormessage'] = array($doi, $errortext);
+      $ret = FALSE;
+    }
+    return $ret;
+  }
+
+  /**
+   * A custom function to expand on the islandora_doi module
+   * Returns a DOI if one exists in the Datacite system, or FALSE if not
+   * 
+   * @param string $doi - this is the pid with the colon removed
+   * 
+   * @return string|boolean
+   * 
+   */
+  function fba_check_doi($doi) {
+    if ($this->fba_check_doi_configuration()) {
+      $doi = $prefix . '/' . $doi;
+      $get_request_url = 'https://' . $username . ':' . $password . '@' . $metadata_url . '/' . $doi;
+      $response = drupal_http_request($get_request_url, array('Content-Type' => 'application/x-www-form-urlencoded', 'charset' => 'UTF-8'), 'GET');
+
+      if ($response->code == '200') {
+        $retval = $doi;
+      }
+      else {
+        $errortext = 'DOI check failed: ' . $response->data;
+        watchdog('fba_doi', $errortext);
+        $_SESSION['errormessage'] = array($doi, $errortext);
+
+        $retval = false;
+      }
+    }
+    else {
+      $errortext = 'Configuration fields not completed.';
+      watchdog('fba_doi', $errortext);
+      $_SESSION['errormessage'] = array($doi, $errortext);
+      $retval = false;
+    }
+    return $retval;
+  }
+
+  function fba_check_doi_configuration() {
+    $testmode = $this->fba_doi_get_testmode();
+    switch ($testmode) {
+      case 0: {
+          //Live processing
+          $metadata_url = DATACITE_DOI_URL;
+          $prefix = islandora_doi_get_prefix();
+          $username = islandora_doi_get_username();
+          $password = islandora_doi_get_password();
+          $hostname = islandora_doi_get_hostname();
+          break;
+        }
+      case 1: {
+          //Test processing
+          $metadata_url = TEST_DATACITE_DOI_URL;
+          $prefix = $this->fba_doi_get_test_prefix();
+          $username = $this->fba_doi_get_test_username();
+          $password = $this->fba_doi_has_test_password();
+          $hostname = $this->fba_doi_get_test_hostname();
+          break;
+        }
+    }
+    if (!is_null($prefix) && !is_null($username) && $password && !is_null($hostname)) {
+      $isconfigured = TRUE;
+    }
+    else {
+      $isconfigured = FALSE;
+    }
+    return $isconfigured;
+  }
+
+  function batchmintdoi($pid, &$context) {
+    $minteddoi = mintdoi($pid);
+    if ($minteddoi !== FALSE) {
+      $mintsuccessful = TRUE;
+    }
+    else {
+      $mintsuccessful = FALSE;
+    }
+    $context['results']['success'][] = array($pid, $mintsuccessful);
+
+    return;
+  }
+
+  /** Getters/Setters * */
+
+  /**
+   * fba_doi_get_testmode
+   * @return 0 for off (live), 1 for on(test)
+   */
+  function fba_doi_get_testmode() {
+    return variable_get('fba_doi_testmode', 0);
+  }
+
+  function fba_doi_get_test_prefix() {
+    return variable_get('fba_test_doi_prefix', '');
+  }
+
+  function fba_doi_get_test_username() {
+    return variable_get('fba_test_doi_username', '');
+  }
+
+  private function fba_doi_get_test_password() {
+    return variable_get('fba_test_doi_password', '');
+  }
+
+  function fba_doi_get_test_hostname() {
+    return variable_get('fba_test_doi_hostname', '');
+  }
+
+  function fba_doi_has_test_password() {
+    $pwd = variable_get('fba_test_doi_password', '');
+    if (empty($pwd)) {
       return FALSE;
     }
+    else {
+      return TRUE;
+    }
   }
-  else {
-    //metadata has failed for some reason (check watchdog logs
-    return FALSE;
+
+  //Getters and setters that return values dependent on test mode
+  function fba_doi_get_prefix() {
+    module_load_include('module', 'islandora_doi', 'islandora_doi');
+
+    if ($this->fba_doi_get_testmode()) {
+      $ret = $this->fba_doi_get_test_prefix();
+    }
+    else {
+      $ret = islandora_doi_get_prefix();
+    }
+    return $ret;
   }
+
+  function fba_doi_get_username() {
+    module_load_include('module', 'islandora_doi', 'islandora_doi');
+
+    if ($this->fba_doi_get_testmode()) {
+      $ret = $this->fba_doi_get_test_username();
+    }
+    else {
+      $ret = islandora_doi_get_username();
+    }
+    return $ret;
+  }
+
+  function fba_doi_get_hostname() {
+    module_load_include('module', 'islandora_doi', 'islandora_doi');
+
+    if ($this->fba_doi_get_testmode()) {
+      $ret = $this->fba_doi_get_test_hostname();
+    }
+    else {
+      $ret = islandora_doi_get_hostname();
+    }
+    return $ret;
+  }
+
 }
 
-/**
- * Format the xml that will be passed to the Datacite site 
- * 
- * @param type $prefix
- * @param type $pid
- * @param type $names
- * @param type $titletext
- * @return string
- */
-function create_datacite_xml($prefix, $pid, $titletext, $version, $createdate, $relatedparty) {
-  module_load_include('inc', 'sidora', 'includes/fba');
+//Functions outside the fba_doi class
+function fba_doi_admin() {
+  module_load_include('inc', 'fba_utility', 'GenericFunctions');
 
-  $reformattedpid = str_replace(':', '', $pid);
+  $form = array();
+  $fba_doi = new fba_doi();
+  $testmode = $fba_doi->fba_doi_get_testmode();
+  $form['fba_doi_testmode'] = array(
+    '#type' => 'radios',
+    '#title' => t('Choose if Test mode is active (ie using Test DOI submission URL etc)'),
+    '#default_value' => $testmode,
+    '#options' => array(
+      t('Test Mode Off'),
+      t('Test Mode On'),
+    )
+  );
 
-  $newDom = new DOMDocument('1.0', 'utf-8');
-  $newDom->formatOutput = TRUE;
+  $form['fba_test_doi_prefix'] = array(
+    '#type' => 'textfield',
+    '#title' => t('TEST DOI Prefix'),
+    '#default_value' => variable_get('fba_test_doi_prefix', ''),
+  );
 
-  $rootEl = $newDom->createElement('resource');
-  $rootEl->setAttribute('xmlns', 'http://datacite.org/schema/kernel-3');
-  $rootEl->setAttribute('xmlns:xsi', 'http://www.w3.org/2001/XMLSchema-instance');
-  $rootEl->setAttribute('xsi:schemaLocation', 'http://datacite.org/schema/kernel-3 http://schema.datacite.org/meta/kernel-3/metadata.xsd');
+  $form['fba_test_doi_username'] = array(
+    '#type' => 'textfield',
+    '#title' => t('TEST DataCite Username'),
+    '#default_value' => variable_get('fba_test_doi_username', ''),
+  );
 
-  $identifier = $newDom->createElement('identifier', $prefix . '/' . $reformattedpid);
-  $identifier->setAttribute('identifierType', 'DOI');
-  $rootEl->appendChild($identifier);
-//
-  $creatorlist = sidora_return_related_party_creators();
-  $creators = $newDom->createElement('creators');
-  foreach ($relatedparty as $relparty) {
-    switch ($relparty['type']) {
-      case 'corporate': {
-          $role = (string) $relparty->corporateRole;
-          $namepart = (string) $relparty->namePart;
-          break;
-        }
-      case 'personal': {
-          $role = (string) $relparty->personalRole;
-          $namepart = (string) $relparty->namePart[0] . ', ' . $relparty->namePart[1];
-          break;
-        }
-    }
-    if (in_array($role, $creatorlist)) {
-      $creator = $newDom->createElement('creator');
-      $creatorname = $newDom->createElement('creatorName', $namepart);
-      $creator->appendChild($creatorname);
-      $creators->appendChild($creator);
-    }
-  }
-  $rootEl->appendChild($creators);
-//
-  $titles = $newDom->createElement('titles');
-  $title = $newDom->createElement('title', $titletext);
-  $titles->appendChild($title);
-  $rootEl->appendChild($titles);
+  $form['fba_test_doi_password'] = array(
+    '#type' => 'textfield',
+    '#title' => t('TEST DataCite Password'),
+    '#default_value' => variable_get('fba_test_doi_password', ''),
+  );
 
-  $publisher = $newDom->createElement('publisher', 'Freshwater Biological Association (FBA)');
-  $rootEl->appendChild($publisher);
+  $form['fba_test_doi_hostname'] = array(
+    '#type' => 'textfield',
+    '#title' => t('TEST System hostname for minted DOI'),
+    '#default_value' => variable_get('fba_test_doi_hostname', ''),
+    '#description' => t('The URL hostname to be used for DOI record. Ex: http://@host_name', array('@host_name' => $_SERVER['SERVER_NAME'])),
+  );
 
-  $pubyear = $newDom->createElement('publicationYear', date("Y"));
-  $rootEl->appendChild($pubyear);
+  $bue = base_url_equiv('data_local');
+  $form['fba_link_to_islandora_doi'] = array(
+    '#type' => 'markup',
+    '#value' => t('<a href="' . $bue . '/admin/settings/islandora_doi">Click here to configure the live mode DOI settings</a><br/><br/>'),
+  );
 
-  $datesdom = $newDom->createElement('dates');
-  $createdatedom = $newDom->createElement('date', $createdate);
-  $createdatedom->setAttribute('dateType', 'Created');
-  $datesdom->appendChild($createdatedom);
-  $rootEl->appendChild($datesdom);
-//
-  $contributors = $newDom->createElement('contributors');
-  $contributorlist = sidora_return_related_party_contributors();
-  foreach ($relatedparty as $relparty) {
-    switch ($relparty['type']) {
-      case 'corporate': {
-          $role = (string) $relparty->corporateRole;
-          $namepart = (string) $relparty->namePart;
-          break;
-        }
-      case 'personal': {
-          $role = (string) $relparty->personalRole;
-          $namepart = (string) $relparty->namePart[0] . ', ' . $relparty->namePart[1];
-          break;
-        }
-    }
-    if (in_array($role, $contributorlist)) {
-      $contributor = $newDom->createElement('contributor');
-      $conttype = sidora_translate_related_party_contributor_for_datacite($role);
-      $contributor->setAttribute('contributorType', $conttype);
-      $contname = $newDom->createElement('contributorName', $namepart);
-      $contributor->appendChild($contname);
-      $contributors->appendChild($contributor);
-    }
-  }
-  //HostingInstitution is always hardcoded string
-  $contributor = $newDom->createElement('contributor');
-  $contributor->setAttribute('contributorType', 'HostingInstitution');
-  $contname = $newDom->createElement('contributorName', 'Freshwater Biological Association');
-  $contributor->appendChild($contname);
-  $contributors->appendChild($contributor);
-  $rootEl->appendChild($contributors);
-//
-  $versiondom = $newDom->createElement('version', $version);
-  $rootEl->appendChild($versiondom);
-  $newDom->appendChild($rootEl);
-//
-  $datacitexml = $newDom->saveXML();
-  return $datacitexml;
+  return system_settings_form($form);
+}
+
+function fba_doi_menu() {
+  $items = array();
+  $items['admin/settings/fba_doi'] = array(
+    'title' => t('FBA DOI'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('fba_doi_admin'),
+    'access arguments' => array('administer fba doi'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+  return $items;
 }

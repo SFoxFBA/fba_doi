@@ -1,14 +1,20 @@
 <?php
 
 function batchmintdoi($pid, &$context) {
-  $minteddoi = mintdoi($pid);
-  if ($minteddoi !== FALSE) {
-    $mintsuccessful = TRUE;
+  module_load_include('module', 'fba_doi', 'fba_doi');
+  $fba_doi = new fba_doi();
+  $metadata = $fba_doi->registermetadata($pid);
+  if ($metadata) {
+    $minteddoi = $fba_doi->mintdoi($pid);
+    if ($minteddoi !== FALSE) {
+      $mintsuccessful = TRUE;
+    }
+    else {
+      $mintsuccessful = FALSE;
+    }
   }
-  else {
-    $mintsuccessful = FALSE;
-  }
-  $context['results']['success'][] = array($pid, $mintsuccessful);
+  $errormessage = $_SESSION['errormessage'];
+  $context['results']['success'][] = array($pid, $mintsuccessful, $errormessage);
 
   return;
 }

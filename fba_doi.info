@@ -1,5 +1,5 @@
 name = "FBA DOI API"
-description = "Additional functionality for FBA DOI"
+description = "Basic DataCite DOI API for Islandora with additional functionality for FBA DOI"
 version = 6.x-13.1
 core = 6.x
 dependencies[] = islandora_doi
